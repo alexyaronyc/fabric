@@ -66,9 +66,9 @@
 ## Updates
 
 > [!NOTE]
-> November 8, 2024
+> February 5, 2025
 >
-> - **Multimodal Support**: You can now use `-a` (attachment) for Multimodal submissions to OpenAI models that support it. Example: `fabric -a https://path/to/image "Give me a description of this image."`
+> - Remember that `fabric` supports `o1` and `o3` models, but you need to 1) not use `-s`, and 2) use the `--raw` flag because the o1 and o3 models don't support the `--stream` option or temperature settings.
 
 ## What and why
 
@@ -126,22 +126,20 @@ To install Fabric, you can use the latest release binaries or install it from th
 
 ### Get Latest Release Binaries
 
-```bash
-# Windows:
-curl -L https://github.com/danielmiessler/fabric/releases/latest/download/fabric-windows-amd64.exe > fabric.exe && fabric.exe --version
+#### Windows:
+`https://github.com/danielmiessler/fabric/releases/latest/download/fabric-windows-amd64.exe`
 
-# MacOS (arm64):
-curl -L https://github.com/danielmiessler/fabric/releases/latest/download/fabric-darwin-arm64 > fabric && chmod +x fabric && ./fabric --version
+#### MacOS (arm64):
+`curl -L https://github.com/danielmiessler/fabric/releases/latest/download/fabric-darwin-arm64 > fabric && chmod +x fabric && ./fabric --version`
 
-# MacOS (amd64):
-curl -L https://github.com/danielmiessler/fabric/releases/latest/download/fabric-darwin-amd64 > fabric && chmod +x fabric && ./fabric --version
+#### MacOS (amd64):
+`curl -L https://github.com/danielmiessler/fabric/releases/latest/download/fabric-darwin-amd64 > fabric && chmod +x fabric && ./fabric --version`
 
-# Linux (amd64):
-curl -L https://github.com/danielmiessler/fabric/releases/latest/download/fabric-linux-amd64 > fabric && chmod +x fabric && ./fabric --version
+#### Linux (amd64):
+`curl -L https://github.com/danielmiessler/fabric/releases/latest/download/fabric-linux-amd64 > fabric && chmod +x fabric && ./fabric --version`
 
-# Linux (arm64):
-curl -L https://github.com/danielmiessler/fabric/releases/latest/download/fabric-linux-arm64 > fabric && chmod +x fabric && ./fabric --version
-```
+#### Linux (arm64):
+`curl -L https://github.com/danielmiessler/fabric/releases/latest/download/fabric-linux-arm64 > fabric && chmod +x fabric && ./fabric --version`
 
 ### From Source
 
@@ -445,7 +443,15 @@ pbpaste | fabric --stream --pattern analyze_claims
 fabric -y "https://youtube.com/watch?v=uXs-zPc63kM" --stream --pattern extract_wisdom
 ```
 
-4. Create patterns- you must create a .md file with the pattern and save it to ~/.config/fabric/patterns/[yourpatternname].
+
+4. Create patterns- you must create a .md file with the pattern and save it to `~/.config/fabric/patterns/[yourpatternname]`.
+
+
+5. Run a `analyze_claims` pattern on a website. Fabric uses Jina AI to scrape the URL into markdown format before sending it to the model.
+
+```bash
+fabric -u https://github.com/danielmiessler/fabric/ -p analyze_claims
+```
 
 ## Just use the Patterns
 
@@ -476,7 +482,6 @@ When you're ready to use them, copy them into:
 
 You can then use them like any other Patterns, but they won't be public unless you explicitly submit them as Pull Requests to the Fabric project. So don't worry—they're private to you.
 
-This feature works with all openai and ollama models but does NOT work with claude. You can specify your model with the -m flag
 
 ## Helper Apps
 
