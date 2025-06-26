@@ -64,11 +64,16 @@ type Flags struct {
 	Serve                           bool              `long:"serve" description:"Serve the Fabric Rest API"`
 	ServeOllama                     bool              `long:"serveOllama" description:"Serve the Fabric Rest API with ollama endpoints"`
 	ServeAddress                    string            `long:"address" description:"The address to bind the REST API" default:":8080"`
+	ServeAPIKey                     string            `long:"api-key" description:"API key used to secure server routes" default:""`
 	Config                          string            `long:"config" description:"Path to YAML config file"`
 	Version                         bool              `long:"version" description:"Print current version"`
 	ListExtensions                  bool              `long:"listextensions" description:"List all registered extensions"`
 	AddExtension                    string            `long:"addextension" description:"Register a new extension from config file path"`
 	RemoveExtension                 string            `long:"rmextension" description:"Remove a registered extension by name"`
+	Strategy                        string            `long:"strategy" description:"Choose a strategy from the available strategies" default:""`
+	ListStrategies                  bool              `long:"liststrategies" description:"List all strategies"`
+	ListVendors                     bool              `long:"listvendors" description:"List all vendors"`
+	ShellCompleteOutput             bool              `long:"shell-complete-list" description:"Output raw list without headers/formatting (for shell completion)"`
 }
 
 var debug = false
@@ -267,13 +272,14 @@ func (o *Flags) BuildChatRequest(Meta string) (ret *common.ChatRequest, err erro
 		ContextName:      o.Context,
 		SessionName:      o.Session,
 		PatternName:      o.Pattern,
+		StrategyName:     o.Strategy,
 		PatternVariables: o.PatternVariables,
 		InputHasVars:     o.InputHasVars,
 		Meta:             Meta,
 	}
 
 	var message *goopenai.ChatCompletionMessage
-	if o.Attachments == nil || len(o.Attachments) == 0 {
+	if len(o.Attachments) == 0 {
 		if o.Message != "" {
 			message = &goopenai.ChatCompletionMessage{
 				Role:    goopenai.ChatMessageRoleUser,
@@ -330,7 +336,6 @@ func (o *Flags) BuildChatRequest(Meta string) (ret *common.ChatRequest, err erro
 
 func (o *Flags) AppendMessage(message string) {
 	o.Message = AppendMessage(o.Message, message)
-	return
 }
 
 func (o *Flags) IsChatRequest() (ret bool) {

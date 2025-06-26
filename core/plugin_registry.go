@@ -3,11 +3,16 @@ package core
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 
+	"github.com/danielmiessler/fabric/plugins/ai/bedrock"
 	"github.com/danielmiessler/fabric/plugins/ai/exolab"
+	"github.com/danielmiessler/fabric/plugins/strategy"
 
 	"github.com/samber/lo"
 
@@ -16,17 +21,12 @@ import (
 	"github.com/danielmiessler/fabric/plugins/ai"
 	"github.com/danielmiessler/fabric/plugins/ai/anthropic"
 	"github.com/danielmiessler/fabric/plugins/ai/azure"
-	"github.com/danielmiessler/fabric/plugins/ai/deepseek"
 	"github.com/danielmiessler/fabric/plugins/ai/dryrun"
 	"github.com/danielmiessler/fabric/plugins/ai/gemini"
-	"github.com/danielmiessler/fabric/plugins/ai/groq"
-	"github.com/danielmiessler/fabric/plugins/ai/litellm"
 	"github.com/danielmiessler/fabric/plugins/ai/lmstudio"
-	"github.com/danielmiessler/fabric/plugins/ai/mistral"
 	"github.com/danielmiessler/fabric/plugins/ai/ollama"
 	"github.com/danielmiessler/fabric/plugins/ai/openai"
-	"github.com/danielmiessler/fabric/plugins/ai/openrouter"
-	"github.com/danielmiessler/fabric/plugins/ai/siliconcloud"
+	"github.com/danielmiessler/fabric/plugins/ai/openai_compatible"
 	"github.com/danielmiessler/fabric/plugins/db/fsdb"
 	"github.com/danielmiessler/fabric/plugins/template"
 	"github.com/danielmiessler/fabric/plugins/tools"
@@ -44,6 +44,7 @@ func NewPluginRegistry(db *fsdb.Db) (ret *PluginRegistry, err error) {
 		YouTube:        youtube.NewYouTube(),
 		Language:       lang.NewLanguage(),
 		Jina:           jina.NewClient(),
+		Strategies:     strategy.NewStrategiesManager(),
 	}
 
 	var homedir string
@@ -54,25 +55,48 @@ func NewPluginRegistry(db *fsdb.Db) (ret *PluginRegistry, err error) {
 
 	ret.Defaults = tools.NeeDefaults(ret.GetModels)
 
-	ret.VendorsAll.AddVendors(
+	// Create a vendors slice to hold all vendors (order doesn't matter initially)
+	vendors := []ai.Vendor{}
+
+	// Add non-OpenAI compatible clients
+	vendors = append(vendors,
 		openai.NewClient(),
 		ollama.NewClient(),
 		azure.NewClient(),
-		groq.NewClient(),
 		gemini.NewClient(),
-		//gemini_openai.NewClient(),
 		anthropic.NewClient(),
-		siliconcloud.NewClient(),
-		openrouter.NewClient(),
 		lmstudio.NewClient(),
-		mistral.NewClient(),
-		deepseek.NewClient(),
 		exolab.NewClient(),
-		litellm.NewClient(),
+		bedrock.NewClient(),
 	)
+
+	// Add all OpenAI-compatible providers
+	for providerName := range openai_compatible.ProviderMap {
+		provider, _ := openai_compatible.GetProviderByName(providerName)
+		vendors = append(vendors, openai_compatible.NewClient(provider))
+	}
+
+	// Sort vendors by name for consistent ordering (case-insensitive)
+	sort.Slice(vendors, func(i, j int) bool {
+		return strings.ToLower(vendors[i].GetName()) < strings.ToLower(vendors[j].GetName())
+	})
+
+	// Add all sorted vendors to VendorsAll
+	ret.VendorsAll.AddVendors(vendors...)
 	_ = ret.Configure()
 
 	return
+}
+
+func (o *PluginRegistry) ListVendors(out io.Writer) error {
+	vendors := lo.Map(o.VendorsAll.Vendors, func(vendor ai.Vendor, _ int) string {
+		return vendor.GetName()
+	})
+	fmt.Fprint(out, "Available Vendors:\n\n")
+	for _, vendor := range vendors {
+		fmt.Fprintf(out, "%s\n", vendor)
+	}
+	return nil
 }
 
 type PluginRegistry struct {
@@ -86,6 +110,7 @@ type PluginRegistry struct {
 	Language           *lang.Language
 	Jina               *jina.Client
 	TemplateExtensions *template.ExtensionManager
+	Strategies         *strategy.StrategiesManager
 }
 
 func (o *PluginRegistry) SaveEnvFile() (err error) {
@@ -94,6 +119,7 @@ func (o *PluginRegistry) SaveEnvFile() (err error) {
 
 	o.Defaults.Settings.FillEnvFileContent(&envFileContent)
 	o.PatternsLoader.SetupFillEnvFileContent(&envFileContent)
+	o.Strategies.SetupFillEnvFileContent(&envFileContent)
 
 	for _, vendor := range o.VendorManager.Vendors {
 		vendor.SetupFillEnvFileContent(&envFileContent)
@@ -109,7 +135,7 @@ func (o *PluginRegistry) SaveEnvFile() (err error) {
 
 func (o *PluginRegistry) Setup() (err error) {
 	setupQuestion := plugins.NewSetupQuestion("Enter the number of the plugin to setup")
-	groupsPlugins := common.NewGroupsItemsSelector[plugins.Plugin]("Available plugins (please configure all required plugins):",
+	groupsPlugins := common.NewGroupsItemsSelector("Available plugins (please configure all required plugins):",
 		func(plugin plugins.Plugin) string {
 			var configuredLabel string
 			if plugin.IsConfigured() {
@@ -125,10 +151,10 @@ func (o *PluginRegistry) Setup() (err error) {
 			return vendor
 		})...)
 
-	groupsPlugins.AddGroupItems("Tools", o.Defaults, o.PatternsLoader, o.YouTube, o.Language, o.Jina)
+	groupsPlugins.AddGroupItems("Tools", o.Defaults, o.Jina, o.Language, o.PatternsLoader, o.Strategies, o.YouTube)
 
 	for {
-		groupsPlugins.Print()
+		groupsPlugins.Print(false)
 
 		if answerErr := setupQuestion.Ask("Plugin Number"); answerErr != nil {
 			break
@@ -206,7 +232,7 @@ func (o *PluginRegistry) Configure() (err error) {
 	return
 }
 
-func (o *PluginRegistry) GetChatter(model string, modelContextLength int, stream bool, dryRun bool) (ret *Chatter, err error) {
+func (o *PluginRegistry) GetChatter(model string, modelContextLength int, strategy string, stream bool, dryRun bool) (ret *Chatter, err error) {
 	ret = &Chatter{
 		db:     o.Db,
 		Stream: stream,
@@ -258,5 +284,6 @@ func (o *PluginRegistry) GetChatter(model string, modelContextLength int, stream
 			model, defaultModel, defaultVendor, errMsg)
 		return
 	}
+	ret.strategy = strategy
 	return
 }

@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	goopenai "github.com/sashabaranov/go-openai"
@@ -10,6 +12,7 @@ import (
 	"github.com/danielmiessler/fabric/common"
 	"github.com/danielmiessler/fabric/plugins/ai"
 	"github.com/danielmiessler/fabric/plugins/db/fsdb"
+	"github.com/danielmiessler/fabric/plugins/strategy"
 	"github.com/danielmiessler/fabric/plugins/template"
 )
 
@@ -24,9 +27,18 @@ type Chatter struct {
 	model              string
 	modelContextLength int
 	vendor             ai.Vendor
+	strategy           string
 }
 
+// Send processes a chat request and applies any file changes if using the create_coding_feature pattern
 func (o *Chatter) Send(request *common.ChatRequest, opts *common.ChatOptions) (session *fsdb.Session, err error) {
+	modelToUse := opts.Model
+	if modelToUse == "" {
+		modelToUse = o.model // Default to the model set in the Chatter struct
+	}
+	if o.vendor.NeedsRawMode(modelToUse) {
+		opts.Raw = true
+	}
 	if session, err = o.BuildSession(request, opts.Raw); err != nil {
 		return
 	}
@@ -35,6 +47,9 @@ func (o *Chatter) Send(request *common.ChatRequest, opts *common.ChatOptions) (s
 	if len(vendorMessages) == 0 {
 		if session.Name != "" {
 			err = o.db.Sessions.SaveSession(session)
+			if err != nil {
+				return
+			}
 		}
 		err = fmt.Errorf("no messages provided")
 		return
@@ -72,6 +87,30 @@ func (o *Chatter) Send(request *common.ChatRequest, opts *common.ChatOptions) (s
 		session = nil
 		err = fmt.Errorf("empty response")
 		return
+	}
+
+	// Process file changes if using the create_coding_feature pattern
+	if request.PatternName == "create_coding_feature" {
+		// Look for file changes in the response
+		summary, fileChanges, parseErr := common.ParseFileChanges(message)
+		if parseErr != nil {
+			fmt.Printf("Warning: Failed to parse file changes: %v\n", parseErr)
+		} else if len(fileChanges) > 0 {
+			// Get the project root - use the current directory
+			projectRoot, err := os.Getwd()
+			if err != nil {
+				fmt.Printf("Warning: Failed to get current directory: %v\n", err)
+				// Continue without applying changes
+			} else {
+				if applyErr := common.ApplyFileChanges(projectRoot, fileChanges); applyErr != nil {
+					fmt.Printf("Warning: Failed to apply file changes: %v\n", applyErr)
+				} else {
+					fmt.Println("Successfully applied file changes.")
+					fmt.Printf("You can review the changes with 'git diff' if you're using git.\n\n")
+				}
+			}
+		}
+		message = summary
 	}
 
 	session.Append(&goopenai.ChatCompletionMessage{Role: goopenai.ChatMessageRoleAssistant, Content: message})
@@ -140,34 +179,60 @@ func (o *Chatter) BuildSession(request *common.ChatRequest, raw bool) (session *
 	}
 
 	systemMessage := strings.TrimSpace(contextContent) + strings.TrimSpace(patternContent)
-	if request.Language != "" {
-		systemMessage = fmt.Sprintf("%s. Please use the language '%s' for the output.", systemMessage, request.Language)
+
+	// Apply strategy if specified
+	if request.StrategyName != "" {
+		strategy, err := strategy.LoadStrategy(request.StrategyName)
+		if err != nil {
+			return nil, fmt.Errorf("could not load strategy %s: %v", request.StrategyName, err)
+		}
+		if strategy != nil && strategy.Prompt != "" {
+			// prepend the strategy prompt to the system message
+			systemMessage = fmt.Sprintf("%s\n%s", strategy.Prompt, systemMessage)
+		}
+	}
+
+	// Apply refined language instruction if specified
+	if request.Language != "" && request.Language != "en" {
+		// Refined instruction: Execute pattern using user input, then translate the entire response.
+		systemMessage = fmt.Sprintf("%s\n\nIMPORTANT: First, execute the instructions provided in this prompt using the user's input. Second, ensure your entire final response, including any section headers or titles generated as part of executing the instructions, is written ONLY in the %s language.", systemMessage, request.Language)
 	}
 
 	if raw {
-		if request.Message != nil {
-			if systemMessage != "" {
-				request.Message.Content = systemMessage
-				// system contains pattern which contains user input
+		// In raw mode, we want to avoid duplicating the input that's already in the pattern
+		var finalContent string
+		if systemMessage != "" {
+			// If we have a pattern, it already includes the user input
+			if request.PatternName != "" {
+				finalContent = systemMessage
+			} else {
+				// No pattern, combine system message with user input
+				finalContent = fmt.Sprintf("%s\n\n%s", systemMessage, request.Message.Content)
 			}
-		} else {
-			if systemMessage != "" {
-				request.Message = &goopenai.ChatCompletionMessage{Role: goopenai.ChatMessageRoleSystem, Content: systemMessage}
+			request.Message = &goopenai.ChatCompletionMessage{
+				Role:    goopenai.ChatMessageRoleUser,
+				Content: finalContent,
 			}
 		}
-	} else {
+		// After this, if request.Message is not nil, append it
+		if request.Message != nil {
+			session.Append(request.Message)
+		}
+	} else { // Not raw mode
 		if systemMessage != "" {
 			session.Append(&goopenai.ChatCompletionMessage{Role: goopenai.ChatMessageRoleSystem, Content: systemMessage})
 		}
-	}
-
-	if request.Message != nil {
-		session.Append(request.Message)
+		// If a pattern was used (request.PatternName != ""), its output (systemMessage)
+		// already incorporates the user input (request.Message.Content via GetApplyVariables).
+		// So, we only append the direct user message if NO pattern was used.
+		if request.PatternName == "" && request.Message != nil {
+			session.Append(request.Message)
+		}
 	}
 
 	if session.IsEmpty() {
 		session = nil
-		err = fmt.Errorf(NoSessionPatternUserMessages)
+		err = errors.New(NoSessionPatternUserMessages)
 	}
 	return
 }

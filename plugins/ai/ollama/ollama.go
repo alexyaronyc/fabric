@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	ollamaapi "github.com/ollama/ollama/api"
@@ -14,6 +15,8 @@ import (
 	"github.com/danielmiessler/fabric/common"
 	"github.com/danielmiessler/fabric/plugins"
 )
+
+const defaultBaseUrl = "http://localhost:11434"
 
 func NewClient() (ret *Client) {
 	vendorName := "Ollama"
@@ -26,17 +29,36 @@ func NewClient() (ret *Client) {
 	}
 
 	ret.ApiUrl = ret.AddSetupQuestionCustom("API URL", true,
-		"Enter your Ollama URL (as a reminder, it is usually http://localhost:1234/v1')")
+		"Enter your Ollama URL (as a reminder, it is usually http://localhost:11434')")
+	ret.ApiUrl.Value = defaultBaseUrl
+	ret.ApiKey = ret.PluginBase.AddSetupQuestion("API key", false)
+	ret.ApiKey.Value = ""
+	ret.ApiHttpTimeout = ret.AddSetupQuestionCustom("HTTP Timeout", true,
+		"Specify HTTP timeout duration for Ollama requests (e.g. 30s, 5m, 1h)")
+	ret.ApiHttpTimeout.Value = "20m"
 
 	return
 }
 
 type Client struct {
 	*plugins.PluginBase
-	ApiUrl *plugins.SetupQuestion
+	ApiUrl         *plugins.SetupQuestion
+	ApiKey         *plugins.SetupQuestion
+	apiUrl         *url.URL
+	client         *ollamaapi.Client
+	ApiHttpTimeout *plugins.SetupQuestion
+}
 
-	apiUrl *url.URL
-	client *ollamaapi.Client
+type transport_sec struct {
+	underlyingTransport http.RoundTripper
+	ApiKey              *plugins.SetupQuestion
+}
+
+func (t *transport_sec) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.ApiKey.Value != "" {
+		req.Header.Add("Authorization", "Bearer "+t.ApiKey.Value)
+	}
+	return t.underlyingTransport.RoundTrip(req)
 }
 
 func (o *Client) configure() (err error) {
@@ -45,7 +67,19 @@ func (o *Client) configure() (err error) {
 		return
 	}
 
-	o.client = ollamaapi.NewClient(o.apiUrl, &http.Client{Timeout: 1200000 * time.Millisecond})
+	timeout := 20 * time.Minute // Default timeout
+
+	if o.ApiHttpTimeout != nil {
+		parsed, err := time.ParseDuration(o.ApiHttpTimeout.Value)
+		if err == nil && o.ApiHttpTimeout.Value != "" {
+			timeout = parsed
+		} else if o.ApiHttpTimeout.Value != "" {
+			fmt.Printf("Invalid HTTP timeout format (%q), using default (20m): %v\n", o.ApiHttpTimeout.Value, err)
+		}
+	}
+
+	o.client = ollamaapi.NewClient(o.apiUrl, &http.Client{Timeout: timeout, Transport: &transport_sec{underlyingTransport: http.DefaultTransport, ApiKey: o.ApiKey}})
+
 	return
 }
 
@@ -120,4 +154,17 @@ func (o *Client) createChatRequest(msgs []*goopenai.ChatCompletionMessage, opts 
 		Options:  options,
 	}
 	return
+}
+
+func (o *Client) NeedsRawMode(modelName string) bool {
+	ollamaPrefixes := []string{
+		"llama3",
+		"llama2",
+	}
+	for _, prefix := range ollamaPrefixes {
+		if strings.HasPrefix(modelName, prefix) {
+			return true
+		}
+	}
+	return false
 }

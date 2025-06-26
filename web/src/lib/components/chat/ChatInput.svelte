@@ -305,10 +305,11 @@ async function readFileContent(file: File): Promise<string> {
     }
   }
 
+  // Centralized language instruction logic in ChatService.ts; YouTube flow now passes plain transcript and system prompt
   async function processYouTubeURL(input: string) {
       console.log('\n=== YouTube Flow Start ===');
       const originalLanguage = get(languageStore);
-    
+
       try {
           // Add processing message first
           messageStore.update(messages => [...messages, {
@@ -316,16 +317,11 @@ async function readFileContent(file: File): Promise<string> {
               content: 'Processing YouTube video...',
               format: 'loading'
           }]);
-        
+
           // Get transcript but don't display it
           const { transcript } = await getTranscript(input);
-        
-          // Log system prompt BEFORE createChatRequest
-          console.log('System prompt BEFORE createChatRequest in YouTube flow:', $systemPrompt);
 
-          // Log system prompt BEFORE streamChat
-          console.log(`System prompt BEFORE streamChat in YouTube flow: ${$systemPrompt}`);
-
+          // Pass plain transcript and system prompt; ChatService will handle language instruction
           const stream = await chatService.streamChat(transcript, $systemPrompt);
           await chatService.processStream(
               stream,
@@ -377,10 +373,132 @@ async function readFileContent(file: File): Promise<string> {
       }
   }
 
+  async function handleSubmit() {
+  if (!userInput.trim()) return;
+
+  try {
+    console.log('\n=== Submit Handler Start ===');
+    
+    // Store the user input before any processing
+    const inputText = userInput.trim();
+    console.log('Captured user input:', inputText);
+    
+    // Handle YouTube URLs with the existing flow
+    if (isYouTubeURL) {
+      console.log('2a. Starting YouTube flow');
+      await processYouTubeURL(inputText);
+      return;
+    }
+    
+    // For regular text input, add the user message to the UI first
+    messageStore.update(messages => [...messages, {
+      role: 'user',
+      content: inputText
+    }]);
+    
+    // Add loading indicator
+    messageStore.update(messages => [...messages, {
+      role: 'system',
+      content: 'Processing...',
+      format: 'loading'
+    }]);
+    
+    // Clear input fields
+    userInput = "";
+    const filesForProcessing = [...uploadedFiles];
+    const contentsForProcessing = [...fileContents];
+    uploadedFiles = [];
+    fileContents = [];
+    fileButtonKey = !fileButtonKey;
+    
+    // Prepare content with file attachments if any
+    const contentWithFiles = contentsForProcessing.length > 0 
+      ? `${inputText}\n\nFile Contents (${filesForProcessing.map(f => f.endsWith('.pdf') ? 'PDF' : 'Text').join(', ')}):\n${contentsForProcessing.join('\n\n---\n\n')}`
+      : inputText;
+    
+    // Get the enhanced prompt
+    const enhancedPrompt = contentsForProcessing.length > 0 
+      ? `${$systemPrompt}\nAnalyze and process the provided content according to these instructions.`
+      : $systemPrompt;
+    
+    console.log('Content to send:', {
+      text: contentWithFiles.substring(0, 100) + '...',
+      length: contentWithFiles.length,
+      hasFiles: contentsForProcessing.length > 0
+    });
+    
+    try {
+      // Get the chat stream
+      const stream = await chatService.streamChat(contentWithFiles, enhancedPrompt);
+      
+      // Process the stream
+      await chatService.processStream(
+        stream,
+        (content, response) => {
+          messageStore.update(messages => {
+            const newMessages = [...messages];
+            // Remove the loading message
+            const loadingIndex = newMessages.findIndex(m => m.format === 'loading');
+            if (loadingIndex !== -1) {
+              newMessages.splice(loadingIndex, 1);
+            }
+            
+            // Always append a new assistant message
+            newMessages.push({
+              role: 'assistant',
+              content,
+              format: response?.format
+            });
+            return newMessages;
+          });
+        },
+
+        (error) => {
+          // Make sure to remove loading message on error
+          messageStore.update(messages => 
+            messages.filter(m => m.format !== 'loading')
+          );
+          console.error('Stream processing error:', error);
+          
+          // Show error message using a valid format type
+          messageStore.update(messages => [...messages, {
+            role: 'system',
+            content: `Error: ${error instanceof Error ? error.message : String(error)}`,
+            format: 'plain'
+          }]);
+        }
+      );
+    } catch (error) {
+      // Make sure to remove loading message on error
+      messageStore.update(messages => 
+        messages.filter(m => m.format !== 'loading')
+      );
+      throw error; // Re-throw to be caught by the outer try/catch
+    }
+  } catch (error) {
+    console.error('Chat submission error:', error);
+    
+    // Make sure to remove loading message on error (redundant but safe)
+    messageStore.update(messages => 
+      messages.filter(m => m.format !== 'loading')
+    );
+    
+    // Show error message using a valid format type
+    messageStore.update(messages => [...messages, {
+      role: 'system',
+      content: `Error: ${error instanceof Error ? error.message : String(error)}`,
+      format: 'plain'
+    }]);
+  } finally {
+    // As a final safety measure, ensure loading message is removed
+    messageStore.update(messages => 
+      messages.filter(m => m.format !== 'loading')
+    );
+  }
+}
+
   
-
-
-async function handleSubmit() {
+/* async function handleSubmit() {
   if (!userInput.trim()) return;
 
   try {
@@ -403,29 +521,28 @@ async function handleSubmit() {
       format: 'loading'
     }]);
     
-    userInput = ""; // Reset userInput BEFORE sendMessage
-    uploadedFiles = []; // Reset uploadedFiles BEFORE sendMessage
-    fileContents = []; // Reset fileContents BEFORE sendMessage
-    fileButtonKey = !fileButtonKey; // Toggle key to force re-creation
-
-
+    // Store the user input before clearing it
+    const inputText = userInput;
+    
+    // Construct finalContent BEFORE clearing userInput
     const finalContent = fileContents.length > 0 
-      ? `${userInput}\n\nFile Contents (${uploadedFiles.map(f => f.endsWith('.pdf') ? 'PDF' : 'Text').join(', ')}):\n${fileContents.join('\n\n---\n\n')}`
-      : userInput;
+      ? `${inputText}\n\nFile Contents (${uploadedFiles.map(f => f.endsWith('.pdf') ? 'PDF' : 'Text').join(', ')}):\n${fileContents.join('\n\n---\n\n')}`
+      : inputText;
+    
+    // Now clear the input fields
+    userInput = ""; 
+    uploadedFiles = []; 
+    fileContents = []; 
+    fileButtonKey = !fileButtonKey; 
      
-      
-       
-
     await sendMessage(finalContent, enhancedPrompt);
     
-   
-    
-
-  
   } catch (error) {
     console.error('Chat submission error:', error);
   }
-}
+} */
+
+ 
 
 
   function handleKeydown(event: KeyboardEvent) {
